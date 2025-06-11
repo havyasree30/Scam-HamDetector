@@ -54,7 +54,9 @@ Each model takes the input (text or URL), preprocesses it, runs prediction, and 
 ├── SMS-spam/
 ├── URL-spam/
 ├── ResultPictures/
-└── README.md
+├── README.md
+├── requirements.txt
+├── CONTRIBUTING.md
 
 ## Contact
 GitHub: [@havyasree30](https://github.com/havyasree30)  
