@@ -50,6 +50,7 @@ Each model takes the input (text or URL), preprocesses it, runs prediction, and 
 
   
 ## Scam-HamDetector/
+<pre> ```
 ├── Emailspam/
 ├── SMS-spam/
 ├── URL-spam/
@@ -57,6 +58,7 @@ Each model takes the input (text or URL), preprocesses it, runs prediction, and 
 ├── README.md
 ├── requirements.txt
 ├── CONTRIBUTING.md
+``` </pre>
 
 ## Contact
 GitHub: [@havyasree30](https://github.com/havyasree30)  
