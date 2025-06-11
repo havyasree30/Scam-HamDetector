@@ -1,0 +1,131 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import random
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import nltk
+from nltk.corpus import stopwords
+from sklearn.model_selection import train_test_split
+from sklearn.utils import resample
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, Conv1D, GlobalMaxPooling1D, Dense, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import nlpaug.augmenter.word as naw
+
+# **1️⃣ Set Seed for Reproducibility**
+seed_value = 42
+os.environ['PYTHONHASHSEED'] = str(seed_value)
+random.seed(seed_value)
+np.random.seed(seed_value)
+tf.random.set_seed(seed_value)
+
+# **2️⃣ Download Stopwords**
+nltk.download('stopwords')
+stop_words = set(stopwords.words('english'))
+
+# **3️⃣ Load Dataset**
+df = pd.read_csv("sms_spam.csv", encoding="latin-1")[["v1", "v2"]]
+df.columns = ["label", "text"]
+df["label"] = df["label"].map({"ham": 0, "spam": 1})  # Convert labels to binary
+
+# **4️⃣ Text Cleaning Function**
+def clean_text(text):
+    text = re.sub(r'\d+', '', text)  # Remove numbers
+    text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
+    text = text.lower()  # Convert to lowercase
+    text = ' '.join([word for word in text.split() if word not in stop_words])  # Remove stopwords
+    return text
+
+df["cleaned_text"] = df["text"].apply(clean_text)
+
+# **5️⃣ Balance Dataset (Oversample if Needed)**
+ham_count, spam_count = df["label"].value_counts()
+df_ham = df[df["label"] == 0]
+df_spam = df[df["label"] == 1].sample(n=ham_count, replace=True, random_state=42) if spam_count < ham_count else df[df["label"] == 1]
+
+df_balanced = pd.concat([df_ham, df_spam]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+# **6️⃣ Data Augmentation (Expand to 10,000 Samples)**
+augmentor = naw.SynonymAug(aug_src="wordnet")
+
+def augment_text(text):
+    try:
+        return augmentor.augment(text)
+    except:
+        return text
+
+new_samples = []
+while len(df_balanced) + len(new_samples) < 10000:
+    sample = df_balanced.sample(1).iloc[0].copy()
+    sample["cleaned_text"] = augment_text(sample["cleaned_text"])
+    new_samples.append(sample)
+
+df_augmented = pd.DataFrame(new_samples)
+df_balanced = pd.concat([df_balanced, df_augmented]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+print(f"Final dataset size: {len(df_balanced)} (Ham: {len(df_balanced[df_balanced['label'] == 0])}, Spam: {len(df_balanced[df_balanced['label'] == 1])})")
+
+# **7️⃣ Tokenization & Padding**
+max_vocab, max_length = 10000, 50
+tokenizer = Tokenizer(num_words=max_vocab, oov_token="<OOV>")
+tokenizer.fit_on_texts(df_balanced["cleaned_text"])
+
+X = pad_sequences(tokenizer.texts_to_sequences(df_balanced["cleaned_text"]), maxlen=max_length)
+y = df_balanced["label"].values
+
+# **8️⃣ Train-Test Split**
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# **9️⃣ CNN Model**
+model = Sequential([
+    Embedding(input_dim=max_vocab, output_dim=128, input_length=max_length),
+    Conv1D(filters=128, kernel_size=5, activation="relu"),
+    BatchNormalization(),
+    GlobalMaxPooling1D(),
+    Dense(128, activation="relu"),
+    Dropout(0.5),
+    Dense(1, activation="sigmoid")
+])
+
+# Compile Model
+model.compile(optimizer=Adam(learning_rate=0.0008), loss="binary_crossentropy", metrics=["accuracy"])
+
+# **🔟 Train Model**
+history = model.fit(X_train, y_train, epochs=10, batch_size=32, validation_data=(X_test, y_test))
+
+# **1️⃣1️⃣ Evaluate Model**
+y_pred = (model.predict(X_test) > 0.5).astype("int32")
+accuracy = accuracy_score(y_test, y_pred)
+print(f"\nTest Accuracy: {accuracy * 100:.2f}%")
+print(classification_report(y_test, y_pred, target_names=["Ham", "Spam"]))
+
+# **1️⃣2️⃣ Plot Training Results**
+plt.figure(figsize=(12, 5))
+
+# Accuracy Plot
+plt.subplot(1, 2, 1)
+plt.plot(history.history["accuracy"], label="Train Accuracy")
+plt.plot(history.history["val_accuracy"], label="Val Accuracy")
+plt.legend()
+plt.title("Model Accuracy")
+
+# Loss Plot
+plt.subplot(1, 2, 2)
+plt.plot(history.history["loss"], label="Train Loss")
+plt.plot(history.history["val_loss"], label="Val Loss")
+plt.legend()
+plt.title("Model Loss")
+plt.show()
+
+# **1️⃣3️⃣ Confusion Matrix**
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(7, 7))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=["Ham", "Spam"], yticklabels=["Ham", "Spam"])
+plt.xlabel("Predicted"), plt.ylabel("Actual"), plt.title("Confusion Matrix")
+plt.show()
