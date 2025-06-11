@@ -1,0 +1,13 @@
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+tensorflow
+keras
+xgboost
+transformers
+torch
+email-validator
+joblib
+
