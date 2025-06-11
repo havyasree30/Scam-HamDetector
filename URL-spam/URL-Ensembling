@@ -1,0 +1,256 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.utils import resample
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+import random
+import os
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+import xgboost as xgb
+import sys
+import time
+
+# **1️⃣ Set Seed for Reproducibility**
+seed_value = 42
+os.environ['PYTHONHASHSEED'] = str(seed_value)
+random.seed(seed_value)
+np.random.seed(seed_value)
+
+# **2️⃣ Load Dataset**
+try:
+    df = pd.read_csv('URL_Phishing_dataset.csv')
+    print(f"Loaded {len(df)} rows from URL_Phishing_dataset.csv")
+except FileNotFoundError:
+    print("Error: 'URL_Phishing_dataset.csv' not found. Please ensure the file is in the working directory.")
+    exit()
+
+# **3️⃣ Prepare Features and Target**
+X = df.drop(columns=['phishing'])
+y = df['phishing']
+X.dropna(inplace=True)
+y = y[X.index]
+print(f"Dataset size after dropping NaNs: {len(X)}")
+
+# **4️⃣ Balance Data**
+print(f"Original legitimate count: {len(y[y == 0])}")
+print(f"Original phishing count: {len(y[y == 1])}")
+df_combined = pd.concat([X, y], axis=1)
+df_legitimate = df_combined[df_combined['phishing'] == 0]
+df_phishing = df_combined[df_combined['phishing'] == 1]
+target_count = max(len(df_legitimate), len(df_phishing))
+df_legitimate_downsampled = resample(df_legitimate, replace=False, n_samples=target_count, random_state=42)
+df_phishing_oversampled = resample(df_phishing, replace=True, n_samples=target_count, random_state=42)
+df_balanced = pd.concat([df_legitimate_downsampled, df_phishing_oversampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+print(f"Balanced dataset size: {len(df_balanced)}")
+
+# **5️⃣ Data Augmentation to 100,000 Samples (if needed)**
+def augment_features(row):
+    new_row = row.copy()
+    for col in new_row.index:
+        if col != 'phishing' and pd.api.types.is_numeric_dtype(new_row[col]):
+            noise = np.random.uniform(-0.1, 0.1) * new_row[col]
+            new_row[col] = max(0, new_row[col] + noise)
+    return new_row
+
+new_samples = []
+while len(df_balanced) + len(new_samples) < 100000:
+    sample = df_balanced.sample(1).iloc[0].copy()
+    augmented_sample = augment_features(sample)
+    new_samples.append(augmented_sample)
+
+df_augmented = pd.DataFrame(new_samples)
+df_balanced = pd.concat([df_balanced, df_augmented]).sample(frac=1, random_state=42).reset_index(drop=True)
+print(f"Final dataset size after augmentation: {len(df_balanced)}")
+
+# **6️⃣ Split Features and Target After Augmentation**
+X = df_balanced.drop(columns=['phishing'])
+y = df_balanced['phishing'].values
+
+# **7️⃣ Scale Features**
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+
+# **8️⃣ Train-Test Split**
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+print(f"Training set size: {len(X_train)}, Testing set size: {len(X_test)}")
+
+# **9️⃣ Define Individual Models with Fine-Tuned Parameters**
+xgb_model = xgb.XGBClassifier(
+    objective='binary:logistic',
+    eval_metric='logloss',
+    random_state=42,
+    learning_rate=0.05,
+    n_estimators=150,
+    max_depth=5
+)
+
+rf_model = RandomForestClassifier(
+    n_estimators=120,
+    max_depth=12,
+    min_samples_split=5,
+    random_state=42,
+    n_jobs=-1
+)
+
+lr_model = LogisticRegression(
+    max_iter=5000,  # Increased max_iter
+    random_state=42,
+    C=0.5,
+    n_jobs=-1
+)
+
+# **10️⃣ Ensemble Model (Soft Voting)**
+ensemble_model = VotingClassifier(
+    estimators=[
+        ('xgb', xgb_model),
+        ('rf', rf_model),
+        ('lr', lr_model)
+    ],
+    voting='soft',
+    weights=[1.5, 1.2, 0.8]
+)
+
+# **11️⃣ Cross-Validation for Robustness**
+models = [('XGBoost', xgb_model), ('Random Forest', rf_model), ('Logistic Regression', lr_model), ('Ensemble', ensemble_model)]
+for name, model in models:
+    cv_scores = cross_val_score(model, X_scaled, y, cv=5, scoring='accuracy')
+    print(f"{name} Cross-Validation Accuracy: {cv_scores.mean() * 100:.2f}% (± {cv_scores.std() * 100:.2f}%)")
+
+# **12️⃣ Train Models and Track Metrics for Ensemble Only**
+train_accuracies = {'Ensemble': []}
+test_accuracies = {'Ensemble': []}
+train_losses = {'Ensemble': []}
+test_losses = {'Ensemble': []}
+
+# Train individual models first (to get their test accuracies)
+individual_models = models[:-1]  # Exclude ensemble
+individual_test_accuracies = {}
+for name, model in individual_models:
+    model.fit(X_train, y_train)
+    test_acc = model.score(X_test, y_test)
+    individual_test_accuracies[name] = test_acc
+
+# Train ensemble model with loading bar
+n_epochs = 10
+epsilon = 1e-15  # Small value to avoid log(0)
+bar_length = 30
+
+print("\nTraining Ensemble Model:")
+for epoch in range(n_epochs):
+    # Calculate progress
+    progress = (epoch + 1) / n_epochs
+    filled = int(bar_length * progress)
+    bar = '█' * filled + '-' * (bar_length - filled)
+    percentage = progress * 100
+    sys.stdout.write(f'\rEpoch {epoch + 1}/{n_epochs} [{bar}] {percentage:.1f}%')
+    sys.stdout.flush()
+    time.sleep(0.1)  # Simulate training time for visualization
+
+    # Train ensemble
+    ensemble_model.fit(X_train, y_train)
+    train_acc = ensemble_model.score(X_train, y_train)
+    test_acc = ensemble_model.score(X_test, y_test)
+    train_accuracies['Ensemble'].append(train_acc)
+    test_accuracies['Ensemble'].append(test_acc)
+    
+    # Clip probabilities to avoid log(0)
+    train_pred_proba = ensemble_model.predict_proba(X_train)
+    test_pred_proba = ensemble_model.predict_proba(X_test)
+    train_pred_proba = np.clip(train_pred_proba, epsilon, 1 - epsilon)
+    test_pred_proba = np.clip(test_pred_proba, epsilon, 1 - epsilon)
+    
+    train_loss = -np.mean(y_train * np.log(train_pred_proba[:, 1]) + (1 - y_train) * np.log(1 - train_pred_proba[:, 1]))
+    test_loss = -np.mean(y_test * np.log(test_pred_proba[:, 1]) + (1 - y_test) * np.log(1 - test_pred_proba[:, 1]))
+    train_losses['Ensemble'].append(train_loss)
+    test_losses['Ensemble'].append(test_loss)
+
+print()  # New line after loading bar
+
+# **13️⃣ Print Individual Model Test Accuracies**
+print("\nIndividual Model Test Accuracies:")
+for name in individual_test_accuracies:
+    print(f"{name} Test Accuracy: {individual_test_accuracies[name] * 100:.2f}%")
+
+# **14️⃣ Ensemble Model Results**
+y_pred_ensemble = ensemble_model.predict(X_test)
+print(f"\nEnsemble Test Accuracy: {test_accuracies['Ensemble'][-1] * 100:.2f}%")
+print("Ensemble Classification Report:")
+print(classification_report(y_test, y_pred_ensemble, target_names=['Legitimate', 'Phishing']))
+
+# **15️⃣ Plot Training and Test Accuracy for Ensemble**
+plt.figure(figsize=(10, 5))
+plt.plot(range(1, n_epochs + 1), train_accuracies['Ensemble'], label='Ensemble Train Acc')
+plt.plot(range(1, n_epochs + 1), test_accuracies['Ensemble'], linestyle='--', label='Ensemble Test Acc')
+plt.title('Ensemble Training and Test Accuracy Over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid()
+plt.show()
+
+# **16️⃣ Plot Training and Test Loss for Ensemble**
+plt.figure(figsize=(10, 5))
+plt.plot(range(1, n_epochs + 1), train_losses['Ensemble'], label='Ensemble Train Loss')
+plt.plot(range(1, n_epochs + 1), test_losses['Ensemble'], linestyle='--', label='Ensemble Test Loss')
+plt.title('Ensemble Training and Test Loss Over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Log Loss')
+plt.legend()
+plt.grid()
+plt.show()
+
+# **17️⃣ Confusion Matrix for Ensemble**
+cm = confusion_matrix(y_test, y_pred_ensemble)
+plt.figure(figsize=(7, 7))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=['Legitimate', 'Phishing'], yticklabels=['Legitimate', 'Phishing'])
+plt.title('Confusion Matrix (Ensemble Model)')
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.show()
+
+
+from sklearn.metrics import roc_curve, auc
+import matplotlib.pyplot as plt
+
+# Get predicted probabilities for positive class
+xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
+lr_proba = lr_model.predict_proba(X_test)[:, 1]  # ✅ fixed here
+rf_proba = rf_model.predict_proba(X_test)[:, 1]
+ensemble_proba = ensemble_model.predict_proba(X_test)[:, 1]
+
+# Calculate ROC and AUC for each model
+fpr_xgb, tpr_xgb, _ = roc_curve(y_test, xgb_proba)
+roc_auc_xgb = auc(fpr_xgb, tpr_xgb)
+
+fpr_lr, tpr_lr, _ = roc_curve(y_test, lr_proba)
+roc_auc_lr = auc(fpr_lr, tpr_lr)
+
+fpr_rf, tpr_rf, _ = roc_curve(y_test, rf_proba)
+roc_auc_rf = auc(fpr_rf, tpr_rf)
+
+fpr_ens, tpr_ens, _ = roc_curve(y_test, ensemble_proba)
+roc_auc_ens = auc(fpr_ens, tpr_ens)
+
+# Plot everything
+plt.figure(figsize=(10, 7))
+plt.plot(fpr_xgb, tpr_xgb, label=f'XGBoost (AUC = {roc_auc_xgb:.2f})', lw=2)
+plt.plot(fpr_lr, tpr_lr, label=f'Logistic Regression (AUC = {roc_auc_lr:.2f})', lw=2)
+plt.plot(fpr_rf, tpr_rf, label=f'Random Forest (AUC = {roc_auc_rf:.2f})', lw=2)
+plt.plot(fpr_ens, tpr_ens, label=f'Ensemble (AUC = {roc_auc_ens:.2f})', lw=3, linestyle='--', color='black')
+
+# Random guess line
+plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+
+# Styling
+plt.title('ROC Curve Comparison - All Models', fontsize=15)
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
